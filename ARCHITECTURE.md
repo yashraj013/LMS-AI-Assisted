@@ -216,15 +216,14 @@ frontend/
 backend/
 ├── src/
 │   ├── config/
-│   │   ├── database.js
-│   │   ├── env.js
+│   │   ├── db.js
 │   │   └── grokConfig.js
 │   ├── models/
-│   │   ├── User.js
-│   │   ├── Module.js
-│   │   ├── Lesson.js
-│   │   ├── Progress.js
-│   │   └── ChatHistory.js
+│   │   ├── userModel.js
+│   │   ├── moduleModel.js
+│   │   ├── lessonModel.js
+│   │   ├── progressModel.js
+│   │   └── chatHistory.js
 │   ├── controllers/
 │   │   ├── authController.js
 │   │   ├── lessonController.js
@@ -232,12 +231,11 @@ backend/
 │   │   ├── progressController.js
 │   │   └── assistantController.js
 │   ├── routes/
-│   │   ├── authRoutes.js
-│   │   ├── lessonRoutes.js
-│   │   ├── moduleRoutes.js
-│   │   ├── progressRoutes.js
-│   │   ├── assistantRoutes.js
-│   │   └── index.js
+│   │   ├── authRoute.js
+│   │   ├── lessonRoute.js
+│   │   ├── moduleRoute.js
+│   │   ├── progressRoute.js
+│   │   ├── assistantRoute.js
 │   ├── middleware/
 │   │   ├── authMiddleware.js
 │   │   ├── errorHandler.js
@@ -489,197 +487,7 @@ db.chatHistory.createIndex({ studentId: 1, createdAt: -1 });
 db.chatHistory.createIndex({ lessonId: 1 });
 ```
 
-### 5.3 MongoDB Connection
 
-```javascript
-// config/database.js
-import mongoose from 'mongoose';
-
-const connectDB = async () => {
-  try {
-    const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-study-workspace';
-    await mongoose.connect(uri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    console.log('MongoDB connected successfully');
-  } catch (error) {
-    console.error('MongoDB connection failed:', error);
-    process.exit(1);
-  }
-};
-
-export default connectDB;
-```
-
----
-
-## 6. Grok API Integration
-
-### 6.1 Grok Service Implementation
-
-```javascript
-// services/grokService.js
-import axios from 'axios';
-
-class GrokService {
-  constructor() {
-    this.apiKey = process.env.GROK_API_KEY;
-    this.apiBaseUrl = 'https://api.x.ai/v1'; // Grok API endpoint
-    this.model = 'grok-1'; // or latest model available
-    this.client = axios.create({
-      baseURL: this.apiBaseUrl,
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 30000
-    });
-  }
-
-  async askQuestion(question, lessonContext, conversationHistory = []) {
-    try {
-      // Build system prompt with lesson context
-      const systemPrompt = `You are an educational AI assistant helping students learn. 
-      You have access to lesson content and should provide clear, educational answers.
-      Lesson Context: ${lessonContext}
-      Always cite the lesson content when relevant.`;
-
-      // Build messages array
-      const messages = [
-        ...conversationHistory,
-        { role: 'user', content: question }
-      ];
-
-      // Call Grok API
-      const response = await this.client.post('/chat/completions', {
-        model: this.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...messages
-        ],
-        temperature: 0.7,
-        max_tokens: 1000,
-        top_p: 0.9
-      });
-
-      return {
-        answer: response.data.choices[0].message.content,
-        usage: response.data.usage,
-        model: response.data.model
-      };
-    } catch (error) {
-      console.error('Grok API error:', error);
-      throw new Error('Failed to get response from AI assistant');
-    }
-  }
-
-  async getAvailableModels() {
-    try {
-      const response = await this.client.get('/models');
-      return response.data.data;
-    } catch (error) {
-      console.error('Error fetching models:', error);
-      throw error;
-    }
-  }
-}
-
-export default new GrokService();
-```
-
-### 6.2 Assistant Controller
-
-```javascript
-// controllers/assistantController.js
-import grokService from '../services/grokService.js';
-import Lesson from '../models/Lesson.js';
-import ChatHistory from '../models/ChatHistory.js';
-
-export const askQuestion = async (req, res) => {
-  try {
-    const { lessonId, question, messageHistory } = req.body;
-    const userId = req.user._id;
-
-    // Validate input
-    if (!lessonId || !question) {
-      return res.status(400).json({ 
-        success: false, 
-        error: { message: 'lessonId and question are required' } 
-      });
-    }
-
-    // Fetch lesson content for context
-    const lesson = await Lesson.findById(lessonId);
-    if (!lesson) {
-      return res.status(404).json({ 
-        success: false, 
-        error: { message: 'Lesson not found' } 
-      });
-    }
-
-    // Get answer from Grok
-    const grokResponse = await grokService.askQuestion(
-      question,
-      lesson.markdownContent, // Use lesson content as context
-      messageHistory || []
-    );
-
-    // Save to chat history
-    const chatEntry = new ChatHistory({
-      studentId: userId,
-      lessonId: lessonId,
-      question: question,
-      answer: grokResponse.answer,
-      grokMetadata: {
-        model: grokResponse.model,
-        tokens: grokResponse.usage.total_tokens
-      }
-    });
-    await chatEntry.save();
-
-    // Return response
-    res.json({
-      success: true,
-      data: {
-        answer: grokResponse.answer,
-        sources: [`lesson:${lessonId}`],
-        timestamp: new Date()
-      }
-    });
-  } catch (error) {
-    console.error('Assistant error:', error);
-    res.status(500).json({
-      success: false,
-      error: { message: error.message }
-    });
-  }
-};
-
-export const getChatHistory = async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { lessonId } = req.query;
-
-    const query = { studentId: userId };
-    if (lessonId) query.lessonId = lessonId;
-
-    const history = await ChatHistory.find(query)
-      .sort({ createdAt: -1 })
-      .limit(50);
-
-    res.json({
-      success: true,
-      data: history
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: { message: error.message }
-    });
-  }
-};
-```
 
 ### 6.3 Environment Configuration
 
